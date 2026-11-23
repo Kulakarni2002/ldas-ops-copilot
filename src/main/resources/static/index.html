@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LDAS Ops Copilot</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#667085; --accent:#2f6fde; --border:#e3e6eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; background:var(--card); border-bottom:1px solid var(--border); }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns: 320px 1fr; gap:16px; padding:16px 24px; max-width:1200px; margin:auto; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; padding:16px; } }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; cursor:pointer; }
+  button.secondary { background:#fff; color:var(--accent); border:1px solid var(--accent); }
+  button.link { background:none; color:#c0392b; padding:0 4px; }
+  input[type=text] { width:100%; padding:10px; border:1px solid var(--border); border-radius:6px; font-size:14px; }
+  ul { list-style:none; padding:0; margin:12px 0 0; }
+  li { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border); font-size:14px; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  #chat { min-height:300px; max-height:60vh; overflow-y:auto; margin-bottom:12px; }
+  .msg { padding:10px 12px; border-radius:8px; margin:8px 0; white-space:pre-wrap; font-size:14px; line-height:1.5; }
+  .user { background:#e8effc; margin-left:15%; }
+  .bot { background:#f1f2f4; margin-right:15%; }
+  .src { font-size:12px; color:var(--muted); margin-top:6px; }
+  .mode { font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>LDAS Ops Copilot</h1>
+  <p>RAG over ops runbooks + an agent that checks service status and raises incidents · Spring Boot · Spring AI · Gemini · pgvector</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Documents</h2>
+    <input type="file" id="file" accept="application/pdf">
+    <div class="row"><button onclick="upload()">Upload PDF</button></div>
+    <div id="uploadStatus" class="mode"></div>
+    <ul id="docs"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Ask</h2>
+    <div id="chat"></div>
+    <input type="text" id="q" placeholder="e.g. Why is ADLS returning 403?" onkeydown="if(event.key==='Enter') ask('rag')">
+    <div class="row">
+      <button onclick="ask('rag')">Ask the runbooks</button>
+      <button class="secondary" onclick="ask('agent')">Ask the agent</button>
+    </div>
+    <p class="mode">Runbooks = answer with sources from your PDFs · Agent = can also check status and create tickets</p>
+  </section>
+</main>
+
+<script>
+  const chat = document.getElementById('chat');
+
+  function addMsg(text, cls, sources) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + cls;
+    div.textContent = text;
+    if (sources && sources.length) {
+      const s = document.createElement('div');
+      s.className = 'src';
+      const unique = [...new Set(sources.map(x => `${x.file} p${x.page} (score ${x.score.toFixed(2)})`))];
+      s.textContent = 'Sources: ' + unique.join(' · ');
+      div.appendChild(s);
+    }
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+    return div;
+  }
+
+  async function loadDocs() {
+    const res = await fetch('/documents');
+    const docs = await res.json();
+    const ul = document.getElementById('docs');
+    ul.innerHTML = '';
+    if (!docs.length) { ul.innerHTML = '<li>No documents yet</li>'; return; }
+    docs.forEach(d => {
+      const li = document.createElement('li');
+      li.textContent = `${d.file} (${d.chunks} chunks)`;
+      const del = document.createElement('button');
+      del.className = 'link';
+      del.textContent = 'Delete';
+      del.onclick = async () => {
+        await fetch('/documents/' + encodeURIComponent(d.file), { method: 'DELETE' });
+        loadDocs();
+      };
+      li.appendChild(del);
+      ul.appendChild(li);
+    });
+  }
+
+  async function upload() {
+    const f = document.getElementById('file').files[0];
+    const status = document.getElementById('uploadStatus');
+    if (!f) { status.textContent = 'Choose a PDF first.'; return; }
+    status.textContent = 'Uploading and embedding…';
+    const form = new FormData();
+    form.append('file', f);
+    const res = await fetch('/documents/upload', { method: 'POST', body: form });
+    if (!res.ok) { status.textContent = 'Upload failed (' + res.status + ')'; return; }
+    const data = await res.json();
+    status.textContent = `Stored ${data.chunksStored} chunk(s) from ${data.file}`;
+    loadDocs();
+  }
+
+  async function ask(mode) {
+    const input = document.getElementById('q');
+    const q = input.value.trim();
+    if (!q) return;
+    addMsg(q, 'user');
+    input.value = '';
+    const thinking = addMsg('Thinking…', 'bot');
+    try {
+      if (mode === 'rag') {
+        const res = await fetch('/ask?q=' + encodeURIComponent(q));
+        const data = await res.json();
+        thinking.remove();
+        addMsg(data.answer, 'bot', data.sources);
+      } else {
+        const res = await fetch('/agent?q=' + encodeURIComponent(q));
+        const text = await res.text();
+        thinking.remove();
+        addMsg(text, 'bot');
+      }
+    } catch (e) {
+      thinking.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  loadDocs();
+</script>
+</body>
+</html>
